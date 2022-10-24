@@ -187,7 +187,7 @@ class IFWI:
                 s = BPDT.unpack_from(s_bytes, real_offset=d.start, secondary=True, first_id=s_first_id)
                 self.bpdts.append(s)
 
-    def __getitem__(self, item):
+    def __getitem__(self, item) -> BPDT.Descriptor:
         i = 0
         while item - self.bpdts[i].first_id >= len(self.bpdts[i].descriptors):
             i += 1
@@ -221,7 +221,16 @@ def extract_main(ifwi: IFWI, args: argparse.Namespace):
 
 
 def update_main(ifwi: IFWI, args: argparse.Namespace):
-    raise NotImplementedError("The 'update' command has not been implemented yet.")
+    d = ifwi[args.NUMBER]
+    ifwi.spi_file.seek(d.start)
+    p = args.FROM.read()
+    if len(p) > d.size:
+        raise NotImplementedError("Automatically increasing partition size has not been implemented yet.")
+    elif len(p) != d.size:
+        print("[WARN] Editing partition table has not been implemented yet. BPDT will reflect old partition size.")
+        print(f"[INFO] Old partition size: {d.size}")
+        print(f"[INFO] New partition size: {len(p)}")
+    ifwi.spi_file.write(p)
 
 
 def parse_args():
@@ -271,7 +280,7 @@ def parse_args():
     parser_update = subparsers.add_parser('update', help='update a partition')
     parser_update.set_defaults(command=update_main)
     parser_update.add_argument('NUMBER', type=int)
-    parser_update.add_argument('FROM', type=argparse.FileType('wb'))
+    parser_update.add_argument('FROM', type=argparse.FileType('rb'))
 
     return parser.parse_args()
 
