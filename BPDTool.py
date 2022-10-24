@@ -17,7 +17,7 @@ class BPDT:
     class Descriptor:
         FORMAT = "<III"
 
-        class Types(enum.Enum):
+        class Type(enum.Enum):
             # Source: https://github.com/platomav/MEAnalyzer/blob/16f0eb9/MEA.py#L10594
             SMIP = 0  # OEM-SMIP Partition
             RBEP = 1  # ROM Boot Extensions Partition (CSE-RBE)
@@ -62,11 +62,11 @@ class BPDT:
             TCCP = 44  # USB Type C Controller Partition (a.k.a. TPCC)
             PSEP = 45  # Programmable Services Engine Partition
 
-        def __init__(self, d_type: Union[int, str], d_start: int, d_size: int = None, d_end: int = None):
+        def __init__(self, d_type: Union[int, str], d_start: int, d_size: int = None, d_end: int = None, bpdt_offset=0):
             if d_size is None and d_end is None:
                 raise ValueError("Must provide one of d_size, d_end")
-            self.type = getattr(self.Types, {int: "__call__", str: "__getitem__"}[type(d_type)])(d_type)
-            self.start = d_start
+            self.type: BPDT.Descriptor.Type = getattr(self.Type, {int: "__call__", str: "__getitem__"}[type(d_type)])(d_type)
+            self.start = d_start + bpdt_offset
             self.size = d_end - d_start if d_size is None else d_size
 
         @property
@@ -74,13 +74,13 @@ class BPDT:
             return self.start + self.size
 
         @classmethod
-        def unpack_from(cls, buffer: bytes, offset=0):
-            return cls(*struct.unpack_from(cls.FORMAT, buffer, offset))
+        def unpack_from(cls, buffer: bytes, offset=0, bpdt_offset=0):
+            return cls(*struct.unpack_from(cls.FORMAT, buffer, offset), bpdt_offset=bpdt_offset)
 
-        def pack_into(self, buffer: bytearray, offset=0):
+        def pack_into(self, buffer: bytearray, offset=0, bpdt_offset=0):
             struct.pack_into(self.FORMAT, buffer, offset, *(
                 self.type.value,
-                self.start,
+                self.start - bpdt_offset,
                 self.size,
             ))
 
@@ -94,8 +94,8 @@ class BPDT:
             checksum: int,
             fit_version: Tuple[int, int, int, int],
             descriptors: List[Descriptor],
-            secondary: bool = False,
-            first_id: int = 0,
+            secondary=False,
+            first_id=0,
     ):
         self.offset = offset
         self.reserved = reserved
@@ -122,16 +122,15 @@ class BPDT:
 
         header_size = struct.calcsize(cls.HEADER_FORMAT)
         descriptor_size = struct.calcsize(cls.Descriptor.FORMAT)
+        bpdt_offset = offset if real_offset is None else real_offset
 
         descriptors = []
         for i in range(descriptor_count):
             d_offset = offset + header_size + i * descriptor_size
-            descriptor = cls.Descriptor.unpack_from(buffer, d_offset)
+            descriptor = cls.Descriptor.unpack_from(buffer, d_offset, bpdt_offset)
             descriptors.append(descriptor)
 
-        if real_offset is not None:
-            offset = real_offset
-        return cls(offset, reserved, checksum, fit_version, descriptors, **kwargs)
+        return cls(bpdt_offset, reserved, checksum, fit_version, descriptors, **kwargs)
 
     def pack_into(self, buffer: bytearray, offset=0):
         struct.pack_into(self.HEADER_FORMAT, buffer, offset, *(
@@ -149,16 +148,16 @@ class BPDT:
 
         for i, d in enumerate(self.descriptors):
             d_offset = offset + header_size + i * descriptor_size
-            d.pack_into(buffer, d_offset)
+            d.pack_into(buffer, d_offset, self.offset)
 
     def __str__(self):
         name = "S-BPDT" if self.secondary else "BPDT"
         return "\n".join([
-            f"{name} @ 0x{self.offset:X}",
+            f"{name:6} @ 0x{self.offset:X}  (FIT v{'.'.join(map(str, self.fit_version))})",
             "  # Type            Start     Size      End",
             *[
                 f" {self.first_id + i:2} {d.type.name:12}"
-                f" {self.offset + d.start:8X} {d.size:8X} {self.offset + d.end:8X}"
+                f" {d.start:8X} {d.size:8X} {d.end:8X}"
                 for i, d in enumerate(self.descriptors)
             ],
         ])
@@ -180,14 +179,19 @@ class IFWI:
             self.bpdts.append(b)
 
             for d in b.descriptors:
-                if d.type != BPDT.Descriptor.Types.S_BPDT:
+                if d.type != BPDT.Descriptor.Type.S_BPDT:
                     continue
-                spi_file.seek(b.offset + d.start)
+                spi_file.seek(d.start)
                 s_bytes = spi_file.read(BPDT.SIZE)
-                s_offset = b.offset + d.start
                 s_first_id = b.first_id + len(b.descriptors)
-                s = BPDT.unpack_from(s_bytes, real_offset=s_offset, secondary=True, first_id=s_first_id)
+                s = BPDT.unpack_from(s_bytes, real_offset=d.start, secondary=True, first_id=s_first_id)
                 self.bpdts.append(s)
+
+    def __getitem__(self, item):
+        i = 0
+        while item - self.bpdts[i].first_id >= len(self.bpdts[i].descriptors):
+            i += 1
+        return self.bpdts[i].descriptors[item - self.bpdts[i].first_id]
 
     def __str__(self):
         return "\n\n".join([str(bpdt) for bpdt in self.bpdts])
@@ -198,8 +202,6 @@ def print_main(ifwi: IFWI, args: argparse.Namespace):
 
 
 def add_main(ifwi: IFWI, args: argparse.Namespace):
-    d = BPDT.Descriptor(args.type, args.start, args.size, args.end)
-    print(d)
     raise NotImplementedError("The 'add' command has not been implemented yet.")
 
 
@@ -212,7 +214,10 @@ def delete_main(ifwi: IFWI, args: argparse.Namespace):
 
 
 def extract_main(ifwi: IFWI, args: argparse.Namespace):
-    raise NotImplementedError("The 'extract' command has not been implemented yet.")
+    d = ifwi[args.NUMBER]
+    ifwi.spi_file.seek(d.start)
+    p = ifwi.spi_file.read(d.size)
+    args.TO.write(p)
 
 
 def update_main(ifwi: IFWI, args: argparse.Namespace):
@@ -235,10 +240,10 @@ def parse_args():
 
     parser_add = subparsers.add_parser('add', help='add a new partition', epilog="\n".join([
         "supported TYPEs:",
-        *(f"  {t.name}" for t in BPDT.Descriptor.Types)
+        *(f"  {t.name}" for t in BPDT.Descriptor.Type)
     ]), formatter_class=argparse.RawDescriptionHelpFormatter)
     parser_add.set_defaults(command=add_main)
-    type_choices = [t.name for t in BPDT.Descriptor.Types]
+    type_choices = [t.name for t in BPDT.Descriptor.Type]
     parser_add.add_argument('-t', '--type', metavar='TYPE', required=True, choices=type_choices)
     parser_add.add_argument('--start', type=int, required=True)
     parser_add_size = parser_add.add_mutually_exclusive_group(required=True)
@@ -261,10 +266,12 @@ def parse_args():
     parser_extract = subparsers.add_parser('extract', help='extract a partition')
     parser_extract.set_defaults(command=extract_main)
     parser_extract.add_argument('NUMBER', type=int)
+    parser_extract.add_argument('TO', type=argparse.FileType('wb'))
 
     parser_update = subparsers.add_parser('update', help='update a partition')
     parser_update.set_defaults(command=update_main)
     parser_update.add_argument('NUMBER', type=int)
+    parser_update.add_argument('FROM', type=argparse.FileType('wb'))
 
     return parser.parse_args()
 
