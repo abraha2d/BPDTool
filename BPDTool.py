@@ -315,6 +315,7 @@ def extract_main(ifwi: IFWI, args: argparse.Namespace):
     ifwi.spi_file.seek(d.start)
     p = ifwi.spi_file.read(d.size)
     args.TO.write(p)
+    args.TO.close()
 
 
 def update_main(ifwi: IFWI, args: argparse.Namespace):
@@ -324,6 +325,7 @@ def update_main(ifwi: IFWI, args: argparse.Namespace):
         move(ifwi, d, size=len(p))
     ifwi.spi_file.seek(d.start)
     ifwi.spi_file.write(p)
+    ifwi.spi_file.close()
 
 
 def parse_args():
@@ -382,8 +384,8 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if args.output:
-        raise NotImplementedError("The '--output' flag has not been implemented yet.")
+    # if args.output:
+    #     raise NotImplementedError("The '--output' flag has not been implemented yet.")
     ifwi = IFWI(args.INPUT)
     args.command(ifwi, args)
 
