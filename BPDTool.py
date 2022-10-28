@@ -335,25 +335,25 @@ def parse_args():
     )
 
     parser.add_argument('INPUT', type=argparse.FileType('rb+'), help="the SPI image to manipulate")
-    parser.add_argument('-o', '--output', type=argparse.FileType('wb'),
-                        help="write modified SPI image to OUTPUT instead of modifying INPUT")
+    # parser.add_argument('-o', '--output', type=argparse.FileType('wb'),
+    #                     help="write modified SPI image to OUTPUT instead of modifying INPUT")
 
     subparsers = parser.add_subparsers(metavar='COMMAND', required=True)
 
     parser_print = subparsers.add_parser('print', help='print the partition table')
     parser_print.set_defaults(command=print_main)
 
-    parser_add = subparsers.add_parser('add', help='add a new partition', epilog="\n".join([
-        "supported TYPEs:",
-        *(f"  {t.name}" for t in BPDT.Descriptor.Type)
-    ]), formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser_add.set_defaults(command=add_main)
-    type_choices = [t.name for t in BPDT.Descriptor.Type]
-    parser_add.add_argument('-t', '--type', metavar='TYPE', required=True, choices=type_choices)
-    parser_add.add_argument('--start', type=auto_int, required=True)
-    parser_add_size = parser_add.add_mutually_exclusive_group(required=True)
-    parser_add_size.add_argument('--size', type=auto_int)
-    parser_add_size.add_argument('--end', type=auto_int)
+    # parser_add = subparsers.add_parser('add', help='add a new partition', epilog="\n".join([
+    #     "supported TYPEs:",
+    #     *(f"  {t.name}" for t in BPDT.Descriptor.Type)
+    # ]), formatter_class=argparse.RawDescriptionHelpFormatter)
+    # parser_add.set_defaults(command=add_main)
+    # type_choices = [t.name for t in BPDT.Descriptor.Type]
+    # parser_add.add_argument('-t', '--type', metavar='TYPE', required=True, choices=type_choices)
+    # parser_add.add_argument('--start', type=auto_int, required=True)
+    # parser_add_size = parser_add.add_mutually_exclusive_group(required=True)
+    # parser_add_size.add_argument('--size', type=auto_int)
+    # parser_add_size.add_argument('--end', type=auto_int)
 
     parser_move = subparsers.add_parser('move', help='move/resize a partition')
     parser_move.set_defaults(command=move_main)
@@ -363,9 +363,9 @@ def parse_args():
     parser_move_size.add_argument('--size', type=auto_int)
     parser_move_size.add_argument('--end', type=auto_int)
 
-    parser_delete = subparsers.add_parser('delete', help='remove a partition')
-    parser_delete.set_defaults(command=delete_main)
-    parser_delete.add_argument('NUMBER', type=auto_int)
+    # parser_delete = subparsers.add_parser('delete', help='remove a partition')
+    # parser_delete.set_defaults(command=delete_main)
+    # parser_delete.add_argument('NUMBER', type=auto_int)
 
     parser_extract = subparsers.add_parser('extract', help='extract a partition')
     parser_extract.set_defaults(command=extract_main)
