@@ -65,7 +65,10 @@ class BPDT:
         def __init__(self, d_type: Union[int, str], d_start: int, d_size: int = None, d_end: int = None, bpdt_offset=0):
             if d_size is None and d_end is None:
                 raise ValueError("Must provide one of d_size, d_end")
-            self.type: BPDT.Descriptor.Type = getattr(self.Type, {int: "__call__", str: "__getitem__"}[type(d_type)])(d_type)
+            self.type: BPDT.Descriptor.Type = getattr(self.Type, {
+                int: "__call__",
+                str: "__getitem__",
+            }[type(d_type)])(d_type)
             self.start = d_start + bpdt_offset
             self.size = d_end - d_start if d_size is None else d_size
 
@@ -88,18 +91,20 @@ class BPDT:
             return f"Descriptor(type={self.type.__repr__()}, start={self.start}, size={self.size})"
 
     def __init__(
-            self,
-            offset: int,
-            reserved: int,
-            checksum: int,
-            fit_version: Tuple[int, int, int, int],
-            descriptors: List[Descriptor],
-            bpdt_offset=None,
-            first_id=0,
+        self,
+        offset: int,
+        reserved: int,
+        checksum: int,
+        ifwi_version: int,
+        fit_version: Tuple[int, int, int, int],
+        descriptors: List[Descriptor],
+        bpdt_offset=None,
+        first_id=0,
     ):
         self.offset = offset
         self.reserved = reserved
         self._checksum = checksum
+        self.ifwi_version = ifwi_version
         self.fit_version = fit_version
         self.descriptors = descriptors
         self.bpdt_offset = bpdt_offset
@@ -119,9 +124,8 @@ class BPDT:
         signature, descriptor_count, bpdt_version, reserved, checksum, ifwi_version = header_tuple[:6]
         fit_version = header_tuple[6:]
 
-        assert signature == 0x55aa, "Invalid BPDT header signature"
-        assert bpdt_version == cls.VERSION, "Unknown BPDT version"
-        assert ifwi_version == IFWI.VERSION, "Unknown IFWI version"
+        assert signature == 0x55aa, f"Invalid BPDT header signature {signature}"
+        assert bpdt_version == cls.VERSION, f"Unknown BPDT version {bpdt_version}"
 
         header_size = struct.calcsize(cls.HEADER_FORMAT)
         descriptor_size = struct.calcsize(cls.Descriptor.FORMAT)
@@ -133,7 +137,16 @@ class BPDT:
             descriptor = cls.Descriptor.unpack_from(buffer, d_offset, d_bpdt_offset)
             descriptors.append(descriptor)
 
-        return cls(real_offset, reserved, checksum, fit_version, descriptors, bpdt_offset=bpdt_offset, **kwargs)
+        return cls(
+            offset=real_offset,
+            reserved=reserved,
+            checksum=checksum,
+            ifwi_version=ifwi_version,
+            fit_version=fit_version,
+            descriptors=descriptors,
+            bpdt_offset=bpdt_offset,
+            **kwargs,
+        )
 
     def pack_into(self, buffer: bytearray, offset=0):
         struct.pack_into(self.HEADER_FORMAT, buffer, offset, *(
@@ -142,7 +155,7 @@ class BPDT:
             self.VERSION,
             self.reserved,
             self.checksum,
-            IFWI.VERSION,
+            self.ifwi_version,
             *self.fit_version,
         ))
 
@@ -168,7 +181,6 @@ class BPDT:
 
 
 class IFWI:
-    VERSION = 0
     BPDT_OFFSETS = [0x100000, 0x800000]
 
     def __init__(self, spi_file: io.BufferedRandom):
@@ -182,7 +194,7 @@ class IFWI:
             b = BPDT.unpack_from(b_bytes, real_offset=b_offset, first_id=b_first_id)
             self.bpdts.append(b)
 
-            b_bytearray = bytearray(b'\xFF'*BPDT.SIZE)
+            b_bytearray = bytearray(b'\xFF' * BPDT.SIZE)
             b.pack_into(b_bytearray)
             assert bytes(b_bytearray) == b_bytes, "BPDT self-check failed"
 
@@ -195,13 +207,13 @@ class IFWI:
                 s = BPDT.unpack_from(s_bytes, real_offset=d.start, bpdt_offset=b_offset, first_id=s_first_id)
                 self.bpdts.append(s)
 
-                s_bytearray = bytearray(b'\xFF'*BPDT.SIZE)
+                s_bytearray = bytearray(b'\xFF' * BPDT.SIZE)
                 s.pack_into(s_bytearray)
                 assert bytes(s_bytearray) == s_bytes, "S-BPDT self-check failed"
 
     def commit_bpdts(self):
         for b in self.bpdts:
-            b_bytearray = bytearray(b'\xFF'*BPDT.SIZE)
+            b_bytearray = bytearray(b'\xFF' * BPDT.SIZE)
             b.pack_into(b_bytearray)
             self.spi_file.seek(b.offset)
             self.spi_file.write(b_bytearray)
@@ -224,7 +236,7 @@ def add_main(ifwi: IFWI, args: argparse.Namespace):
     raise NotImplementedError("The 'add' command has not been implemented yet.")
 
 
-def move(ifwi: IFWI, d_move: BPDT.Descriptor, start: int = None, size: int = None, end: int = None, level: int = 0):
+def move(ifwi: IFWI, d_move: BPDT.Descriptor, start: int = None, size: int = None, end: int = None, level=0):
     if start is None:
         start = d_move.start
 
@@ -234,16 +246,16 @@ def move(ifwi: IFWI, d_move: BPDT.Descriptor, start: int = None, size: int = Non
         else:
             size = end - start
 
-    prefix = f"{level*'-'}Moving/resizing {d_move.type.name}"
+    prefix = f"{level * '-'}Moving/resizing {d_move.type.name}"
     print(f"{prefix:28} from {d_move.start:8X} + {d_move.size:8X} to {start:8X} + {size:8X}...")
 
     if start < d_move.start:
         # TODO: Double-check function logic for invalidated assumptions if/when implementing.
         raise NotImplementedError("Moving a partition backwards has not been implemented yet.")
 
-    if d_move.type == BPDT.Descriptor.Type.S_BPDT and start != d_move.start or size < d_move.size:
+    if d_move.type == BPDT.Descriptor.Type.S_BPDT and size < d_move.size:
         # TODO: Double-check function logic for invalidated assumptions if/when implementing.
-        raise NotImplementedError("Moving and/or shrinking an S-BPDT partition has not been implemented yet.")
+        raise NotImplementedError("Shrinking an S-BPDT partition has not been implemented yet.")
 
     if size == 0:
         # Nothing extra to do when the end result is an empty partition.
@@ -252,6 +264,8 @@ def move(ifwi: IFWI, d_move: BPDT.Descriptor, start: int = None, size: int = Non
         # Nothing extra to do when staying within the original bounds.
         pass
     else:
+        s_bpdt_contents = []
+
         # Recursively push conflicting partitions out of the way.
         for d in ifwi:
             if d == d_move:
@@ -261,16 +275,17 @@ def move(ifwi: IFWI, d_move: BPDT.Descriptor, start: int = None, size: int = Non
                 # Ignore empty partitions when looking for conflicts.
                 continue
 
-            if d_move == BPDT.Descriptor.Type.S_BPDT and d_move.start <= d.start and d.end <= d_move.end:
-                # S-BPDTs will only be extended, never moved. No need to worry about contained partitions.
-                continue
-
             if d.type == BPDT.Descriptor.Type.S_BPDT and d.start <= d_move.start and d_move.end <= d.end < start + size:
                 # `d` contains `d_move`, and needs to be extended.
-                move(ifwi, d, d.start, end=start + size, level=level+1)
+                move(ifwi, d, d.start, end=start + size, level=level + 1)
             elif d_move.end <= d.start < start + size and start < d.end:
                 # `d` comes after `d_move`, and needs to be moved.
-                move(ifwi, d, start+size, level=level+1)
+                move(ifwi, d, start + size, level=level + 1)
+            elif d_move.type == BPDT.Descriptor.Type.S_BPDT and d_move.start <= d.start and d.end <= d_move.end:
+                # `d_move` contains `d`. Shift `d` without moving data.
+                # `d`'s data will be moved with the entire S-BPDT later.
+                print(f"{(level + 1) * '-'}Shifting {d.type.name}...")
+                d.start = d.start + start - d_move.start
 
     # Read the partition from the current location.
     ifwi.spi_file.seek(d_move.start)
