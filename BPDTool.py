@@ -94,7 +94,7 @@ class BPDT:
             checksum: int,
             fit_version: Tuple[int, int, int, int],
             descriptors: List[Descriptor],
-            secondary=False,
+            bpdt_offset=None,
             first_id=0,
     ):
         self.offset = offset
@@ -102,7 +102,7 @@ class BPDT:
         self._checksum = checksum
         self.fit_version = fit_version
         self.descriptors = descriptors
-        self.secondary = secondary
+        self.bpdt_offset = bpdt_offset
         self.first_id = first_id
 
     @property
@@ -111,7 +111,10 @@ class BPDT:
         return self._checksum
 
     @classmethod
-    def unpack_from(cls, buffer: bytes, offset=0, real_offset=None, **kwargs):
+    def unpack_from(cls, buffer: bytes, offset=0, real_offset=None, bpdt_offset=None, **kwargs):
+        if real_offset is None:
+            real_offset = offset
+
         header_tuple = struct.unpack_from(cls.HEADER_FORMAT, buffer, offset)
         signature, descriptor_count, bpdt_version, reserved, checksum, ifwi_version = header_tuple[:6]
         fit_version = header_tuple[6:]
@@ -122,15 +125,15 @@ class BPDT:
 
         header_size = struct.calcsize(cls.HEADER_FORMAT)
         descriptor_size = struct.calcsize(cls.Descriptor.FORMAT)
-        bpdt_offset = offset if real_offset is None else real_offset
+        d_bpdt_offset = real_offset if bpdt_offset is None else bpdt_offset
 
         descriptors = []
         for i in range(descriptor_count):
             d_offset = offset + header_size + i * descriptor_size
-            descriptor = cls.Descriptor.unpack_from(buffer, d_offset, bpdt_offset)
+            descriptor = cls.Descriptor.unpack_from(buffer, d_offset, d_bpdt_offset)
             descriptors.append(descriptor)
 
-        return cls(bpdt_offset, reserved, checksum, fit_version, descriptors, **kwargs)
+        return cls(real_offset, reserved, checksum, fit_version, descriptors, bpdt_offset=bpdt_offset, **kwargs)
 
     def pack_into(self, buffer: bytearray, offset=0):
         struct.pack_into(self.HEADER_FORMAT, buffer, offset, *(
@@ -145,13 +148,14 @@ class BPDT:
 
         header_size = struct.calcsize(self.HEADER_FORMAT)
         descriptor_size = struct.calcsize(self.Descriptor.FORMAT)
+        d_bpdt_offset = self.offset if self.bpdt_offset is None else self.bpdt_offset
 
         for i, d in enumerate(self.descriptors):
             d_offset = offset + header_size + i * descriptor_size
-            d.pack_into(buffer, d_offset, self.offset)
+            d.pack_into(buffer, d_offset, d_bpdt_offset)
 
     def __str__(self):
-        name = "S-BPDT" if self.secondary else "BPDT"
+        name = "BPDT" if self.bpdt_offset is None else "S-BPDT"
         return "\n".join([
             f"{name:6} @ 0x{self.offset:X}  (FIT v{'.'.join(map(str, self.fit_version))})",
             "  # Type            Start     Size      End",
@@ -178,14 +182,29 @@ class IFWI:
             b = BPDT.unpack_from(b_bytes, real_offset=b_offset, first_id=b_first_id)
             self.bpdts.append(b)
 
+            b_bytearray = bytearray(b'\xFF'*BPDT.SIZE)
+            b.pack_into(b_bytearray)
+            assert bytes(b_bytearray) == b_bytes, "BPDT self-check failed"
+
             for d in b.descriptors:
                 if d.type != BPDT.Descriptor.Type.S_BPDT:
                     continue
                 spi_file.seek(d.start)
                 s_bytes = spi_file.read(BPDT.SIZE)
                 s_first_id = b.first_id + len(b.descriptors)
-                s = BPDT.unpack_from(s_bytes, real_offset=d.start, secondary=True, first_id=s_first_id)
+                s = BPDT.unpack_from(s_bytes, real_offset=d.start, bpdt_offset=b_offset, first_id=s_first_id)
                 self.bpdts.append(s)
+
+                s_bytearray = bytearray(b'\xFF'*BPDT.SIZE)
+                s.pack_into(s_bytearray)
+                assert bytes(s_bytearray) == s_bytes, "S-BPDT self-check failed"
+
+    def commit_bpdts(self):
+        for b in self.bpdts:
+            b_bytearray = bytearray(b'\xFF'*BPDT.SIZE)
+            b.pack_into(b_bytearray)
+            self.spi_file.seek(b.offset)
+            self.spi_file.write(b_bytearray)
 
     def __getitem__(self, item) -> BPDT.Descriptor:
         i = 0
@@ -205,8 +224,71 @@ def add_main(ifwi: IFWI, args: argparse.Namespace):
     raise NotImplementedError("The 'add' command has not been implemented yet.")
 
 
+def move(ifwi: IFWI, d_move: BPDT.Descriptor, start: int = None, size: int = None, end: int = None, level: int = 0):
+    if start is None:
+        start = d_move.start
+
+    if size is None:
+        if end is None:
+            size = d_move.size
+        else:
+            size = end - start
+
+    prefix = f"{level*'-'}Moving/resizing {d_move.type.name}"
+    print(f"{prefix:28} from {d_move.start:8X} + {d_move.size:8X} to {start:8X} + {size:8X}...")
+
+    if start < d_move.start:
+        # TODO: Double-check function logic for invalidated assumptions if/when implementing.
+        raise NotImplementedError("Moving a partition backwards has not been implemented yet.")
+
+    if d_move.type == BPDT.Descriptor.Type.S_BPDT and start != d_move.start or size < d_move.size:
+        # TODO: Double-check function logic for invalidated assumptions if/when implementing.
+        raise NotImplementedError("Moving and/or shrinking an S-BPDT partition has not been implemented yet.")
+
+    if size == 0:
+        # Nothing extra to do when the end result is an empty partition.
+        pass
+    elif size <= d_move.size and 0 <= start - d_move.start <= d_move.size - size:
+        # Nothing extra to do when staying within the original bounds.
+        pass
+    else:
+        # Recursively push conflicting partitions out of the way.
+        for d in ifwi:
+            if d == d_move:
+                continue
+
+            if d.size == 0:
+                # Ignore empty partitions when looking for conflicts.
+                continue
+
+            if d_move == BPDT.Descriptor.Type.S_BPDT and d_move.start <= d.start and d.end <= d_move.end:
+                # S-BPDTs will only be extended, never moved. No need to worry about contained partitions.
+                continue
+
+            if d.type == BPDT.Descriptor.Type.S_BPDT and d.start <= d_move.start and d_move.end <= d.end < start + size:
+                # `d` contains `d_move`, and needs to be extended.
+                move(ifwi, d, d.start, end=start + size, level=level+1)
+            elif d_move.end <= d.start < start + size and start < d.end:
+                # `d` comes after `d_move`, and needs to be moved.
+                move(ifwi, d, start+size, level=level+1)
+
+    # Read the partition from the current location.
+    ifwi.spi_file.seek(d_move.start)
+    d_part = ifwi.spi_file.read(d_move.size)
+
+    # Update the descriptor in the BPDT with the new start/size.
+    d_move.start = start
+    d_move.size = size
+    ifwi.commit_bpdts()
+
+    # Write the partition to the new location, truncating if necessary.
+    ifwi.spi_file.seek(d_move.start)
+    ifwi.spi_file.write(d_part[:d_move.size])
+
+
 def move_main(ifwi: IFWI, args: argparse.Namespace):
-    raise NotImplementedError("The 'move' command has not been implemented yet.")
+    d = ifwi[args.NUMBER]
+    move(ifwi, d, start=args.start, size=args.size, end=args.end)
 
 
 def delete_main(ifwi: IFWI, args: argparse.Namespace):
@@ -222,18 +304,17 @@ def extract_main(ifwi: IFWI, args: argparse.Namespace):
 
 def update_main(ifwi: IFWI, args: argparse.Namespace):
     d = ifwi[args.NUMBER]
-    ifwi.spi_file.seek(d.start)
     p = args.FROM.read()
-    if len(p) > d.size:
-        raise NotImplementedError("Automatically increasing partition size has not been implemented yet.")
-    elif len(p) != d.size:
-        print("[WARN] Editing partition table has not been implemented yet. BPDT will reflect old partition size.")
-        print(f"[INFO] Old partition size: {d.size}")
-        print(f"[INFO] New partition size: {len(p)}")
+    if d.size != len(p):
+        move(ifwi, d, size=len(p))
+    ifwi.spi_file.seek(d.start)
     ifwi.spi_file.write(p)
 
 
 def parse_args():
+    def auto_int(x):
+        return int(x, 0)
+
     parser = argparse.ArgumentParser(
         description='Manipulate partitions in an Intel IFWI SPI image.',
     )
@@ -254,32 +335,31 @@ def parse_args():
     parser_add.set_defaults(command=add_main)
     type_choices = [t.name for t in BPDT.Descriptor.Type]
     parser_add.add_argument('-t', '--type', metavar='TYPE', required=True, choices=type_choices)
-    parser_add.add_argument('--start', type=int, required=True)
+    parser_add.add_argument('--start', type=auto_int, required=True)
     parser_add_size = parser_add.add_mutually_exclusive_group(required=True)
-    parser_add_size.add_argument('--size', type=int)
-    parser_add_size.add_argument('--end', type=int)
+    parser_add_size.add_argument('--size', type=auto_int)
+    parser_add_size.add_argument('--end', type=auto_int)
 
     parser_move = subparsers.add_parser('move', help='move/resize a partition')
     parser_move.set_defaults(command=move_main)
-    parser_move.add_argument('NUMBER', type=int)
-    parser_move.add_argument('--start', type=int)
+    parser_move.add_argument('NUMBER', type=auto_int)
+    parser_move.add_argument('--start', type=auto_int)
     parser_move_size = parser_move.add_mutually_exclusive_group()
-    parser_move_size.add_argument('--size', type=int)
-    parser_move_size.add_argument('--end', type=int)
-    parser_move.add_argument('END')
+    parser_move_size.add_argument('--size', type=auto_int)
+    parser_move_size.add_argument('--end', type=auto_int)
 
     parser_delete = subparsers.add_parser('delete', help='remove a partition')
     parser_delete.set_defaults(command=delete_main)
-    parser_delete.add_argument('NUMBER', type=int)
+    parser_delete.add_argument('NUMBER', type=auto_int)
 
     parser_extract = subparsers.add_parser('extract', help='extract a partition')
     parser_extract.set_defaults(command=extract_main)
-    parser_extract.add_argument('NUMBER', type=int)
+    parser_extract.add_argument('NUMBER', type=auto_int)
     parser_extract.add_argument('TO', type=argparse.FileType('wb'))
 
     parser_update = subparsers.add_parser('update', help='update a partition')
     parser_update.set_defaults(command=update_main)
-    parser_update.add_argument('NUMBER', type=int)
+    parser_update.add_argument('NUMBER', type=auto_int)
     parser_update.add_argument('FROM', type=argparse.FileType('rb'))
 
     return parser.parse_args()
